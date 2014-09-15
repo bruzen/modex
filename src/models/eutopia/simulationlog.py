@@ -6,6 +6,10 @@ the reason using dataset directly is awkward is because it is hard-coded to use 
 the reason this is complicated because we have several cooperating classes kicking around: the database and the tables in that database.
 
 TODO: use python's logging class instead of debugprints
+TODO: maybe instead of passing the SimulationLog to each SimulationTable at init, we take a page from SQLAlchemy and use a .bind member
+      reason being that it feels awkward, sometimes, to have to choose your run_id and set up your timesteps just to create logging table
+TODO: create_tables() is an awkward bit of procedural mucking up my nice. Maybe we can do them on first log() call??
+TODO: allow optional disabling of autocommit; postgres is reasonably fast at taking commits but sqlite is achingly slow. Presumably keeping things in memory and then flushing (say, once per 10 simulation steps) will be a lot easier.
 """
 
 
@@ -74,6 +78,9 @@ class SimulationTable(Table):
         # prefix the table by "run_id". prefix becase, while SQL in theory
         # works on sets and is ignorant of order, but sqlalchemy isn't, and csv isn't.
         assert isinstance(parent, SimulationLog), "SimulationTable only works with SimulationLogs."
+        
+        if any(isinstance(c, Column) and c.name == "run_id" for c in schema):
+            raise ValueError("run_id is a reserved column name in SimulationTables")
         
         schema = (Column("run_id", Integer, ForeignKey("runs.id"), primary_key=True, default=parent.run_id),) + schema #the default here is a constant and *private*
         # TODO: use ForeignKey(parent.runs_table.c.id) instead of a string, for stronger typing win
@@ -242,6 +249,10 @@ class TimestepTable(SimulationTable):
         # prefix the table by 'time'; note that the time is pulled, via closure, from the parent ModelLog object
         #assert isinstance(parent, TimestepLog), "TimestepTable only works with TimestepLogs."
         assert hasattr(parent, 'time'), "TimestepTable only works with TimestepLogs." #looser, duck-typed precondition
+        
+        if any(isinstance(c, Column) and c.name == "time" for c in schema):
+            raise ValueError("time is a reserved column name in TimestepTables")
+        
         schema = (Column("time", Integer, ForeignKey("timesteps.time"), primary_key=True, default=lambda: parent.time),
                  ) + schema
                  
@@ -321,12 +332,14 @@ class SimulationLog(object):
      
      TODO: support syntactic sugar for generating tables; something like log['newtablename'](Column(), Column(), ...)
     """
-    def __init__(self, connection_string):
+    def __init__(self, connection_string = None):
+        if connection_string is None: connection_string = "sqlite://"
         self.database = sqlalchemy.create_engine(connection_string)
         self._metadata = sqlalchemy.MetaData() #create a new metadata for each , so that the column default trick is isolated per-
         self._metadata.bind = self.database
         
         self.run_id = uuid.uuid4().int & 0x7FFFFFFF #generate a new unique id, then clip it to 31bits because SQL can't handle bigints (interestingly, sqlite's int type can handle 32 bit (ie unsigned int), but postgres's cannot
+        # we could store run_id as text but I feel like premature optimization is the name of the day here
         
         # construct a central table that SimulationTables can ForeignKey their id columns to.
         self.runs_table = Table(self, "runs", Column("id", sqlalchemy.Integer, primary_key=True))
